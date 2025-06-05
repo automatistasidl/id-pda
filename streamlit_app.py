@@ -1,35 +1,52 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from datetime import datetime
 import os
+import time
 
-# Nome do arquivo CSV para armazenar os dados
+# Configurações iniciais
 CSV_FILE = "controle_pdas.csv"
+DATE_FORMAT = "%d/%m/%Y %H:%M:%S"
 
-# Inicializar o DataFrame se o arquivo não existir
+# Inicializar o DataFrame
+@st.cache_resource(show_spinner=False)
 def init_data():
-    if not os.path.exists(CSV_FILE):
+    if os.path.exists(CSV_FILE):
+        df = pd.read_csv(
+            CSV_FILE,
+            parse_dates=["Data Retirada", "Data Devolução"],
+            dayfirst=True
+        )
+    else:
         df = pd.DataFrame(columns=[
             "Matrícula", 
             "Data Retirada", 
             "Número PDA", 
             "Data Devolução"
         ])
-        df.to_csv(CSV_FILE, index=False)
+        df.to_csv(CSV_FILE, index=False, date_format=DATE_FORMAT)
+    
+    # Converter colunas de data para datetime se necessário
+    if not df.empty:
+        if not pd.api.types.is_datetime64_any_dtype(df["Data Retirada"]):
+            df["Data Retirada"] = pd.to_datetime(df["Data Retirada"], dayfirst=True)
+        if not pd.api.types.is_datetime64_any_dtype(df["Data Devolução"]):
+            df["Data Devolução"] = pd.to_datetime(df["Data Devolução"], dayfirst=True)
+    
+    return df
 
-# Carregar dados do CSV
-def load_data():
-    return pd.read_csv(CSV_FILE, parse_dates=["Data Retirada", "Data Devolução"])
-
-# Salvar dados no CSV
+# Salvar dados
 def save_data(df):
-    df.to_csv(CSV_FILE, index=False)
+    df.to_csv(CSV_FILE, index=False, date_format=DATE_FORMAT)
+    st.cache_resource.clear()
 
 # Verificar se usuário já tem PDA ativo
 def usuario_tem_pda_ativo(df, matricula):
     filtro = (df["Matrícula"] == matricula) & (df["Data Devolução"].isna())
-    if not df[filtro].empty:
-        return df[filtro].iloc[0]["Número PDA"]
+    registros = df[filtro]
+    if not registros.empty:
+        return registros.iloc[0]["Número PDA"]
     return None
 
 # Verificar se PDA já está emprestado
@@ -37,80 +54,90 @@ def pda_esta_emprestado(df, pda_num):
     filtro = (df["Número PDA"] == pda_num) & (df["Data Devolução"].isna())
     return not df[filtro].empty
 
-# Interface Streamlit
+# Interface principal
 def main():
+    st.set_page_config(
+        page_title="Controle de PDAs", 
+        page_icon="📱",
+        layout="centered"
+    )
+    
     st.title("📱 Controle de PDAs")
-    st.subheader("Registro de Entrada e Saída de Equipamentos")
+    st.caption("Sistema de registro de entrada e saída de equipamentos")
     
-    init_data()
-    df = load_data()
+    # Carregar dados
+    df = init_data()
     
-    # Seleção de operação
-    operacao = st.radio("Selecione a operação:", 
-                        ("Retirada de PDA", "Devolução de PDA"),
-                        horizontal=True)
-    
-    # Campos de entrada
-    matricula = st.text_input("Matrícula:", max_chars=20).strip().upper()
-    pda_num = st.text_input("Número do PDA:", max_chars=20).strip().upper()
-    
-    # Botão de confirmação
-    if st.button("Confirmar Operação"):
-        if not matricula or not pda_num:
-            st.error("Preencha todos os campos!")
-            return
-            
-        if operacao == "Retirada de PDA":
-            # Verifica se usuário já tem PDA ativo
-            pda_ativo = usuario_tem_pda_ativo(df, matricula)
-            if pda_ativo:
-                st.error(f"ERRO: Usuário já possui PDA {pda_ativo} ativo!")
-                return
-                
-            # Verifica se PDA já está emprestado
-            if pda_esta_emprestado(df, pda_num):
-                st.error(f"ERRO: PDA {pda_num} já está emprestado!")
-                return
-                
-            # Registra nova retirada
-            novo_registro = pd.DataFrame([{
-                "Matrícula": matricula,
-                "Data Retirada": datetime.now(),
-                "Número PDA": pda_num,
-                "Data Devolução": None
-            }])
-            
-            df = pd.concat([df, novo_registro], ignore_index=True)
-            save_data(df)
-            st.success(f"PDA {pda_num} retirado com sucesso!")
-            
-        else:  # Devolução
-            # Encontra registro correspondente
-            filtro = (df["Matrícula"] == matricula) & \
-                     (df["Número PDA"] == pda_num) & \
-                     (df["Data Devolução"].isna())
-                     
-            registros = df[filtro]
-            
-            if registros.empty:
-                st.error("Registro não encontrado ou PDA já devolvido!")
+    # Formulário de operação
+    with st.form("operacao_form", clear_on_submit=True):
+        operacao = st.radio(
+            "Selecione a operação:", 
+            ("Retirada de PDA", "Devolução de PDA"),
+            horizontal=True
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            matricula = st.text_input("Matrícula:", key="matricula", max_chars=20).strip().upper()
+        with col2:
+            pda_num = st.text_input("Número do PDA:", key="pda_num", max_chars=20).strip().upper()
+        
+        submitted = st.form_submit_button("Confirmar Operação")
+        
+        if submitted:
+            if not matricula or not pda_num:
+                st.error("Preencha todos os campos!")
             else:
-                # Atualiza data de devolução
-                idx = registros.index[0]
-                df.at[idx, "Data Devolução"] = datetime.now()
-                save_data(df)
-                st.success(f"PDA {pda_num} devolvido com sucesso!")
+                if operacao == "Retirada de PDA":
+                    # Verificar se usuário já tem PDA ativo
+                    pda_ativo = usuario_tem_pda_ativo(df, matricula)
+                    if pda_ativo:
+                        st.error(f"ERRO: Usuário já possui PDA {pda_ativo} ativo!")
+                    else:
+                        # Verificar se PDA já está emprestado
+                        if pda_esta_emprestado(df, pda_num):
+                            st.error(f"ERRO: PDA {pda_num} já está emprestado!")
+                        else:
+                            # Registrar nova retirada
+                            novo_registro = {
+                                "Matrícula": matricula,
+                                "Data Retirada": datetime.now(),
+                                "Número PDA": pda_num,
+                                "Data Devolução": None
+                            }
+                            df = pd.concat([df, pd.DataFrame([novo_registro])], ignore_index=True)
+                            save_data(df)
+                            st.success(f"✅ PDA {pda_num} retirado com sucesso!")
+                else:  # Devolução
+                    # Encontrar registro correspondente
+                    filtro = (df["Matrícula"] == matricula) & \
+                             (df["Número PDA"] == pda_num) & \
+                             (df["Data Devolução"].isna())
+                    
+                    registros = df[filtro]
+                    
+                    if registros.empty:
+                        st.error("❌ Registro não encontrado ou PDA já devolvido!")
+                    else:
+                        # Atualizar data de devolução
+                        idx = registros.index[0]
+                        df.at[idx, "Data Devolução"] = datetime.now()
+                        save_data(df)
+                        st.success(f"✅ PDA {pda_num} devolvido com sucesso!")
     
-    # Exibir histórico
+    # Histórico e estatísticas
     st.divider()
     st.subheader("Histórico de Movimentações")
     
-    # Filtros para o histórico
-    col1, col2 = st.columns(2)
-    with col1:
-        filtrar_matricula = st.text_input("Filtrar por matrícula:").strip().upper()
-    with col2:
-        filtrar_pda = st.text_input("Filtrar por PDA:").strip().upper()
+    # Filtros
+    with st.expander("Filtros", expanded=True):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            filtrar_matricula = st.text_input("Filtrar por matrícula:", key="filtro_mat").strip().upper()
+        with col2:
+            filtrar_pda = st.text_input("Filtrar por PDA:", key="filtro_pda").strip().upper()
+        with col3:
+            status = st.selectbox("Status:", ["Todos", "Ativos", "Devolvidos"])
     
     # Aplicar filtros
     df_display = df.copy()
@@ -118,15 +145,23 @@ def main():
         df_display = df_display[df_display["Matrícula"] == filtrar_matricula]
     if filtrar_pda:
         df_display = df_display[df_display["Número PDA"] == filtrar_pda]
+    if status == "Ativos":
+        df_display = df_display[df_display["Data Devolução"].isna()]
+    elif status == "Devolvidos":
+        df_display = df_display[df_display["Data Devolução"].notna()]
     
-    # Mostrar dataframe formatado
+    # Formatar datas para exibição
+    df_display["Data Retirada"] = df_display["Data Retirada"].dt.strftime(DATE_FORMAT)
+    df_display["Data Devolução"] = df_display["Data Devolução"].apply(
+        lambda x: x.strftime(DATE_FORMAT) if not pd.isna(x) else "Em uso"
+    )
+    
+    # Mostrar histórico
     st.dataframe(
-        df_display.sort_values("Data Retirada", ascending=False),
-        column_config={
-            "Data Retirada": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
-            "Data Devolução": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm")
-        },
+        df_display,
+        column_order=["Matrícula", "Número PDA", "Data Retirada", "Data Devolução"],
         hide_index=True,
+        use_container_width=True,
         height=300
     )
     
@@ -136,11 +171,22 @@ def main():
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Total de PDAs", df["Número PDA"].nunique())
+        total_pdas = df["Número PDA"].nunique()
+        st.metric("Total de PDAs", total_pdas)
     with col2:
-        st.metric("Emprestados Ativos", df["Data Devolução"].isna().sum())
+        ativos = df["Data Devolução"].isna().sum()
+        st.metric("PDAs Ativos", ativos)
     with col3:
-        st.metric("Total de Movimentações", len(df))
+        movimentacoes = len(df)
+        st.metric("Total Movimentações", movimentacoes)
+    
+    # Exportar dados
+    st.download_button(
+        label="Exportar Dados (CSV)",
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name=f"controle_pdas_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv"
+    )
 
 if __name__ == "__main__":
     main()
